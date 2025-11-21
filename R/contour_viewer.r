@@ -75,6 +75,11 @@ contour_slider <- function(
   )
 }
 
+#' @param choice_names vector of names for the \code{choices} argument in
+#'   \code{shiny::selectInput}. The values returned to the server are defined
+#'   by the \code{raster_paths} argument, but names can be provided for display
+#'   in the dropdown. Defaults to \code{basename(raster_paths)}.
+#'
 #' @return \code{shiny::selectInput}
 #' @export
 #'
@@ -87,12 +92,13 @@ raster_select <- function(
     inputId,
     raster_paths,
     label = "Raster File:",
+    choice_names = basename(raster_paths),
     ...
 ) {
   shiny::selectInput(
     inputId,
     label = label,
-    choices = stats::setNames(raster_paths, basename(raster_paths)),
+    choices = stats::setNames(raster_paths, choice_names),
     width = "100%",
     ...
   )
