@@ -16,6 +16,8 @@
 #'   generated. If \code{cache_dir} is provided each contour polygon displayed
 #'   is saved as a geojson file in \code{cache_dir} so it can be rendered more
 #'   quickly in the future.
+#' @param smooth logical specifying whether to smooth contour polygons using
+#'   \code{smoothr::smooth}
 #'
 #' @examples
 #' \dontrun{
@@ -104,17 +106,17 @@ raster_select <- function(
   )
 }
 
-#' @param title title for \code{shinydashboard::box}
+#' @param title title for \code{bslib::card}
 #' @param r_input logical specifying whether to include an input for selecting a
 #'   raster file
 #' @param c_input logical specifying whether to include an input for selecting a
 #'   contour level
 #'
-#' @return \code{shinydashboard::box}
+#' @return \code{bslib::card}
 #' @export
 #'
 #' @describeIn contour_viewer UI definition consisting of a
-#'   \code{shinydashboard::box} containing a \code{leaflet} map and optional
+#'   \code{bslib::card} containing a \code{leaflet} map and optional
 #'   \code{shiny} inputs for a \code{shiny} module, paired with
 #'   \code{cv_map_server}
 #'
@@ -122,7 +124,7 @@ cv_map_ui <- function(
   id,
   title = "Contour Viewer",
   r_input = TRUE,
-  c_input = FALSE,
+  c_input = TRUE,
   raster_paths = NULL
 ) {
   ns <- shiny::NS(id)
@@ -134,11 +136,14 @@ cv_map_ui <- function(
     tl <- shiny::tagAppendChild(tl, contour_slider(ns("c")))
   }
   tl <- shiny::tagAppendChild(tl, leaflet::leafletOutput(ns("map")))
-  shinydashboard::box(tl, width = 12, title = title)
+  bslib::card(bslib::card_header(title), tl)
 }
 
 #' @param sr \code{sf} object containing seasonal range polygons
 #' @param hu \code{sf} object containing herd unit polygons
+#' @param rct_tab \code{shiny} reactive expression for passing tab change events
+#'   into module. Needed for multiple-tab contexts because reactive updates via
+#'   \code{leaflet::leafletProxy} only succeed when map is on screen.
 #' @param rct_r \code{shiny} reactive expression for passing selected raster
 #'   into module
 #' @param rct_c \code{shiny} reactive expression for passing selected contour
@@ -158,9 +163,11 @@ cv_map_server <- function(
   id,
   sr = NULL,
   hu = NULL,
+  rct_tab = NULL,
   rct_r = NULL,
   rct_c = NULL,
-  cache_dir = NULL
+  cache_dir = NULL,
+  smooth = FALSE
 ) {
   shiny::moduleServer(
     id,
@@ -168,42 +175,61 @@ cv_map_server <- function(
 
       out <- shiny::reactiveValues(r = NULL, c = NULL)
 
-      wr_data <- shiny::reactive({
+      raster <- shiny::reactive({
 
-        r <- if (inherits(rct_r, "reactive")) {
+        if (inherits(rct_r, "reactive")) {
           rct_r()
         } else {
           input$r
         }
 
-        c <- if (inherits(rct_c, "reactive")) {
+      })
+
+      contour <- shiny::reactive({
+
+        if (inherits(rct_c, "reactive")) {
           rct_c()
         } else {
           input$c
         }
 
-        shiny::req(r, c)
+      })
+
+      contour_data <- shiny::reactive({
+        shiny::req(raster(), contour())
 
         if (!is.null(cache_dir)) {
           filepath <- file.path(
             cache_dir,
             sprintf(
               "%s_%02d.geojson",
-              tools::file_path_sans_ext(basename(r)),
-              as.integer(c * 100)
+              tools::file_path_sans_ext(basename(raster())),
+              as.integer(contour() * 100)
             )
           )
           if (file.exists(filepath)) {
-            x <- sf::st_read(filepath)
+            x <- sf::read_sf(filepath)
           } else {
-            x <- sf::st_write(get_contour(r, c), filepath)
+            x <- sf::write_sf(get_contour(raster(), contour()), filepath)
           }
         } else {
-          x <- get_contour(r, c)
+          x <- get_contour(raster(), contour())
+        }
+
+        if (smooth) {
+          x <- smoothr::smooth(x, method = "ksmooth", smoothness = 5)
         }
 
         x
 
+      })
+
+      update_map <- shiny::reactive({
+        if (inherits(rct_tab, "reactive")) {
+          list(contour_data(), rct_tab())
+        } else {
+          contour_data()
+        }
       })
 
       if (!is.null(rct_r)) {
@@ -277,24 +303,18 @@ cv_map_server <- function(
 
       lf_prx <- leaflet::leafletProxy("map", session)
 
-      shiny::observeEvent(wr_data(), {
-
-        bounds <- wr_data() |>
-          sf::st_bbox() |>
-          as.character()
+      shiny::observeEvent(update_map(), {
 
         lf_prx |>
-          leaflet::clearGroup("wr") |>
+          leaflet::clearGroup("contours") |>
           leaflet::addPolygons(
-            data = wr_data(),
+            data = contour_data(),
             color = "#C72C41",
             fill = "#C72C41",
             opacity = 0.5,
-            group = "wr"
+            group = "contours"
           ) |>
-          leaflet::fitBounds(
-            bounds[1], bounds[2], bounds[3], bounds[4]
-          )
+          fitRaster(raster())
 
       })
 
@@ -316,112 +336,97 @@ contour_viewer <- function(
   raster_paths,
   sr = NULL,
   hu = NULL,
-  cache_dir = NULL
+  cache_dir = NULL,
+  smooth = FALSE
 ) {
 
   ui <- function(request) {
-    shinydashboard::dashboardPage(
-      header = shinydashboard::dashboardHeader(title = "sr.utils"),
-      sidebar = shinydashboard::dashboardSidebar(
-        shinydashboard::sidebarMenu(
-          shinydashboard::menuItem(
-            "Compare Rasters",
-            icon = shiny::icon("map", lib = "font-awesome"),
-            tabName = "fixed_c",
-            selected = TRUE
+    bslib::page_navbar(
+      id = "cvtab",
+      title = shiny::tags$h1(
+        shiny::tags$span(
+          shiny::tags$img(
+            src = "https://wgfd.wyo.gov/themes/custom/wgfd/images/logo.png",
+            width = "60px",
+            height = "auto",
+            class = "me-3",
+            alt = "WGFD logo"
           ),
-          shinydashboard::menuItem(
-            "Compare Contours",
-            icon = shiny::icon("percent", lib = "font-awesome"),
-            tabName = "fixed_r"
+          "Contour Viewer"
+        )
+      ),
+      footer = shiny::div(
+        shiny::helpText("\u00A9 2025 WGFD - SRA Unit"),
+        style = "text-align: center;"
+      ),
+      theme = bslib::bs_theme(
+        fg = "#00374D",
+        bg = "#FFFFFF",
+        base_font = "'Source Sans Pro', Helvetica, sans-serif;",
+        heading_font = "Oswald, 'Open Sans', Helvetica, sans-serif;",
+        primary = "#00374D"
+      ),
+      navbar_options = bslib::navbar_options(collapsible = FALSE),
+      bslib::nav_spacer(),
+      # shared contour, different rasters
+      bslib::nav_panel(
+        title = "Compare Rasters",
+        bslib::card(
+          bslib::card_header("Contour level:"),
+          contour_slider("cfx", label = NULL)
+        ),
+        bslib::layout_columns(
+          col_widths = c(6, 6),
+          cv_map_ui(
+            "fc1",
+            "Raster 1",
+            c_input = FALSE,
+            raster_paths = raster_paths
           ),
-          shinydashboard::menuItem(
-            "Free Compare",
-            icon = shiny::icon("pencil", lib = "font-awesome"),
-            tabName = "free"
+          cv_map_ui(
+            "fc2",
+            "Raster 2",
+            c_input = FALSE,
+            raster_paths = raster_paths
           )
         )
       ),
-      body = shinydashboard::dashboardBody(
-        shinydashboard::tabItems(
-          shinydashboard::tabItem(
-            tabName = "fixed_c",
-            shiny::fluidRow(
-              shiny::column(
-                width = 12,
-                shinydashboard::box(
-                  width = 12,
-                  title = "Contour level:",
-                  contour_slider("cfx", label = NULL)
-                )
-              )
-            ),
-            shiny::fluidRow(
-              shiny::column(
-                width = 6,
-                cv_map_ui("fc1", "Raster 1", raster_paths = raster_paths)
-              ),
-              shiny::column(
-                width = 6,
-                cv_map_ui("fc2", "Raster 2", raster_paths = raster_paths)
-              )
-            )
-          ),
-          shinydashboard::tabItem(
-            tabName = "fixed_r",
-            shiny::fluidRow(
-              shiny::column(
-                width = 12,
-                shinydashboard::box(
-                  width = 12,
-                  title = "Raster file:",
-                  raster_select("rfx", raster_paths, label = NULL)
-                )
-              )
-            ),
-            shiny::fluidRow(
-              shiny::column(
-                width = 6,
-                cv_map_ui(
-                  "fr1",
-                  "Contour 1",
-                  c_input = TRUE,
-                  r_input = FALSE,
-                  raster_paths = raster_paths
-                )
-              ),
-              shiny::column(
-                width = 6,
-                cv_map_ui(
-                  "fr2",
-                  "Contour 2",
-                  c_input = TRUE,
-                  r_input = FALSE,
-                  raster_paths = raster_paths
-                )
-              )
-            )
-          ),
-          shinydashboard::tabItem(
-            tabName = "free",
-            shiny::fluidRow(
-              shiny::column(
-                width = 6,
-                cv_map_ui("free1", c_input = TRUE, raster_paths = raster_paths)
-              ),
-              shiny::column(
-                width = 6,
-                cv_map_ui("free2", c_input = TRUE, raster_paths = raster_paths)
-              )
-            )
-          )
+      # shared raster, different contours
+      bslib::nav_panel(
+        title = "Compare Contours",
+        bslib::card(
+          bslib::card_header("Raster file:"),
+          raster_select("rfx", raster_paths, label = NULL)
         ),
-        shiny::tags$head(
-          shiny::tags$style(shiny::HTML("
-            .box-title {
-              width: 100%;
-            }
-          "))
+        bslib::layout_columns(
+          col_widths = c(6, 6),
+          cv_map_ui(
+            "fr1",
+            "Contour 1",
+            r_input = FALSE,
+            raster_paths = raster_paths
+          ),
+          cv_map_ui(
+            "fr2",
+            "Contour 2",
+            r_input = FALSE,
+            raster_paths = raster_paths
+          )
+        )
+      ),
+      # independent raster and contours
+      bslib::nav_panel(
+        title = "Free Compare",
+        bslib::layout_columns(
+          col_widths = c(6, 6),
+          cv_map_ui(
+            "free1",
+            raster_paths = raster_paths
+          ),
+          cv_map_ui(
+            "free2",
+            raster_paths = raster_paths
+          )
         )
       )
     )
@@ -429,20 +434,43 @@ contour_viewer <- function(
 
   server <- function(input, output, session) {
 
+    rct_tab <- shiny::reactive(input$cvtab)
     rct_r <- shiny::reactive(input$rfx)
     rct_c <- shiny::reactive(input$cfx)
 
-    cv_map_server("fc1", sr, hu, rct_c = rct_c, cache_dir = cache_dir)
-    cv_map_server("fc2", sr, hu, rct_c = rct_c, cache_dir = cache_dir)
+    cv_map_server(
+      "fc1", sr, hu,
+      rct_tab = rct_tab, rct_c = rct_c, cache_dir = cache_dir
+    )
+    cv_map_server(
+      "fc2", sr, hu,
+      rct_tab = rct_tab, rct_c = rct_c, cache_dir = cache_dir
+    )
 
-    cv_map_server("fr1", sr, hu, rct_r = rct_r, cache_dir = cache_dir)
-    cv_map_server("fr2", sr, hu, rct_r = rct_r, cache_dir = cache_dir)
+    cv_map_server(
+      "fr1", sr, hu,
+      rct_tab = rct_tab, rct_r = rct_r, cache_dir = cache_dir
+    )
+    cv_map_server(
+      "fr2", sr, hu,
+      rct_tab = rct_tab, rct_r = rct_r, cache_dir = cache_dir
+    )
 
-    cv_map_server("free1", sr, hu, cache_dir = cache_dir)
-    cv_map_server("free2", sr, hu, cache_dir = cache_dir)
+    cv_map_server(
+      "free1", sr, hu,
+      rct_tab = rct_tab, cache_dir = cache_dir
+    )
+    cv_map_server(
+      "free2", sr, hu,
+      rct_tab = rct_tab, cache_dir = cache_dir
+    )
 
   }
 
   shiny::shinyApp(ui, server)
 
 }
+
+# TODO: implement shared extent
+# TODO: observe current tab
+
