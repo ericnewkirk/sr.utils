@@ -16,8 +16,6 @@
 #'   generated. If \code{cache_dir} is provided each contour polygon displayed
 #'   is saved as a geojson file in \code{cache_dir} so it can be rendered more
 #'   quickly in the future.
-#' @param smooth logical specifying whether to smooth contour polygons using
-#'   \code{smoothr::smooth}
 #'
 #' @examples
 #' \dontrun{
@@ -152,6 +150,9 @@ cv_map_ui <- function(
 #'   generated. If \code{cache_dir} is provided each contour polygon displayed
 #'   is saved as a geojson file in \code{cache_dir} so it can be rendered more
 #'   quickly in the future.
+#' @param sync_group character group name for syncing zoom and pan
+#' @param smooth logical specifying whether to smooth contour polygons using
+#'   \code{smoothr::smooth}
 #'
 #' @return \code{shiny::moduleServer}
 #' @export
@@ -167,6 +168,7 @@ cv_map_server <- function(
   rct_r = NULL,
   rct_c = NULL,
   cache_dir = NULL,
+  sync_group = NULL,
   smooth = FALSE
 ) {
   shiny::moduleServer(
@@ -284,6 +286,11 @@ cv_map_server <- function(
               opacity = 1,
               fillOpacity = 0
             )
+        }
+
+        if (!is.null(sync_group)) {
+          lf <- lf |>
+            leaflet.minicharts::syncWith(sync_group)
         }
 
         lf |>
@@ -440,29 +447,35 @@ contour_viewer <- function(
 
     cv_map_server(
       "fc1", sr, hu,
-      rct_tab = rct_tab, rct_c = rct_c, cache_dir = cache_dir
+      rct_tab = rct_tab, rct_c = rct_c,
+      cache_dir = cache_dir, sync_group = "fc", smooth = TRUE
     )
     cv_map_server(
       "fc2", sr, hu,
-      rct_tab = rct_tab, rct_c = rct_c, cache_dir = cache_dir
+      rct_tab = rct_tab, rct_c = rct_c,
+      cache_dir = cache_dir, sync_group = "fc", smooth = TRUE
     )
 
     cv_map_server(
       "fr1", sr, hu,
-      rct_tab = rct_tab, rct_r = rct_r, cache_dir = cache_dir
+      rct_tab = rct_tab, rct_r = rct_r,
+      cache_dir = cache_dir, sync_group = "fr", smooth = TRUE
     )
     cv_map_server(
       "fr2", sr, hu,
-      rct_tab = rct_tab, rct_r = rct_r, cache_dir = cache_dir
+      rct_tab = rct_tab, rct_r = rct_r,
+      cache_dir = cache_dir, sync_group = "fr", smooth = TRUE
     )
 
     cv_map_server(
       "free1", sr, hu,
-      rct_tab = rct_tab, cache_dir = cache_dir
+      rct_tab = rct_tab,
+      cache_dir = cache_dir, smooth = TRUE
     )
     cv_map_server(
       "free2", sr, hu,
-      rct_tab = rct_tab, cache_dir = cache_dir
+      rct_tab = rct_tab,
+      cache_dir = cache_dir, smooth = TRUE
     )
 
   }
@@ -470,7 +483,3 @@ contour_viewer <- function(
   shiny::shinyApp(ui, server)
 
 }
-
-# TODO: implement shared extent
-# TODO: observe current tab
-
