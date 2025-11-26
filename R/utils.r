@@ -1,4 +1,5 @@
 .data <- rlang::.data
+.env <- rlang::.env
 
 #' @title Utilities
 #'
