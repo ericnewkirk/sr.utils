@@ -44,6 +44,10 @@
 #'
 seasonal_filter <- function(x, date_col, start, end) {
 
+  if (nrow(x) == 0) {
+    return(x)
+  }
+
   # check that filter args are correct class
   stopifnot(
     "start must be a POSIX or Date" = inherits(start, c("POSIXt", "Date")),
